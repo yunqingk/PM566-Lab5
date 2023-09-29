@@ -1,0 +1,179 @@
+---
+title: "Lab 5"
+author: "Karisa Ke"
+format: html
+embed-resources: true
+editor: visual
+---
+
+```{r}
+library(data.table)
+library(dplyr)
+library(dtplyr)
+```
+
+```{r}
+# Where are we getting the data from
+met_url <- "https://github.com/USCbiostats/data-science-data/raw/master/02_met/met_all.gz"
+# Downloading the data to a tempfile (so it is destroyed afterwards)
+# you can replace this with, for example, your own data:
+# tmp <- tempfile(fileext = ".gz")
+tmp <- "met.gz"
+# We sould be downloading this, ONLY IF this was not downloaded already.
+# otherwise is just a waste of time.
+if (!file.exists(tmp)) {
+  download.file(
+    url      = met_url,
+    destfile = tmp,
+    # method   = "libcurl", timeout = 1000 (you may need this option)
+  )
+}
+
+dat <- fread(tmp)
+```
+
+```{r}
+# Download the data
+stations <- fread("ftp://ftp.ncdc.noaa.gov/pub/data/noaa/isd-history.csv")
+stations[, USAF := as.integer(USAF)]
+
+# Dealing with NAs and 999999
+stations[, USAF   := fifelse(USAF == 999999, NA_integer_, USAF)]
+stations[, CTRY   := fifelse(CTRY == "", NA_character_, CTRY)]
+stations[, STATE  := fifelse(STATE == "", NA_character_, STATE)]
+
+# Selecting the three relevant columns, and keeping unique records
+stations <- unique(stations[, list(USAF, CTRY, STATE)])
+
+# Dropping NAs
+stations <- stations[!is.na(USAF)]
+
+# Removing duplicates
+stations[, n := 1:.N, by = .(USAF)]
+stations <- stations[n == 1,][, n := NULL]
+```
+
+```{r}
+# Merge the data
+dat <- merge(
+  # Data
+  x     = dat,      
+  y     = stations, 
+  # List of variables to match
+  by.x  = "USAFID",
+  by.y  = "USAF", 
+  # Which obs to keep?
+  all.x = TRUE,      
+  all.y = FALSE
+  )
+```
+
+## Question 1
+
+```{r}
+dat[, .(wind.sp_med=median(wind.sp, na.rm=TRUE), temp_med=median(temp, na.rm=TRUE), atm.press_med=median(atm.press, na.rm=TRUE)), by=STATE]
+```
+
+```{r}
+datstations <- dat[, .(wind.sp=mean(wind.sp, na.rm=TRUE), temp=mean(temp, na.rm=TRUE), atm.press=mean(atm.press, na.rm=TRUE)), by=.(USAFID, STATE)]
+```
+
+```{r}
+datstations[, tempmed :=quantile(temp, probs=0.5, na.rm = TRUE)]
+datstations[, windspmed :=quantile(wind.sp, probs=0.5, na.rm = TRUE)]
+datstations[, atmpressmed :=quantile(atm.press, probs=0.5, na.rm = TRUE)]
+
+datstations[which.min(abs(temp-tempmed))]
+datstations[which.min(abs(wind.sp-windspmed))]
+datstations[which.min(abs(atm.press-atmpressmed))]
+```
+
+## Question 2
+
+```{r}
+datstations[, tempstatmed :=quantile(temp, probs=0.5, na.rm = TRUE), by=STATE]
+datstations[, windspstatmed :=quantile(wind.sp, probs=0.5, na.rm = TRUE), by=STATE]
+datstations[, atmpstatmed :=quantile(atm.press, probs=0.5, na.rm = TRUE), by=STATE]
+```
+
+```{r}
+datstations[, tempdif :=which.min(abs(atm.press-atmpstatmed)), by=STATE]
+datstations[, record:=1:.N, by=STATE]
+datstations[record==tempdif, .(USAFID, atm.press, atmpstatmed, by=STATE)]
+```
+
+```{r}
+datstations[, tempdif :=which.min(abs(wind.sp-windspstatmed)), by=STATE]
+datstations[record==tempdif, .(USAFID, wind.sp, windspstatmed, by=STATE)]
+```
+
+```{r}
+datstations[, tempdif :=which.min(abs(temp-tempstatmed)), by=STATE]
+datstations[record==tempdif, .(USAFID, temp, tempstatmed, by=STATE)]
+```
+
+## Question 3
+
+```{r}
+datstationsmid <- unique(dat[, .(USAFID, STATE, lon, lat)])
+datstationsmid[, latmidpt := quantile(lat, probs=0.5, na.rm=TRUE), by=STATE]
+datstationsmid[, lonmidpt := quantile(lon, probs=0.5, na.rm=TRUE), by=STATE]
+datstationsmid[, distance := sqrt((lat-latmidpt)^2+(lon-lonmidpt)^2)]
+datstationsmid[, minrecord := which.min(distance), by=STATE]
+datstationsmid[, n := 1:.N, by=STATE]
+location <- datstationsmid[n==minrecord, .(USAFID, STATE, lon, lat)]
+
+location
+```
+
+```{r}
+all <- dat[, .(USAFID, STATE, lon, lat)][, .SD[1], by="USAFID"]
+datstations[, tempdif :=which.min(abs(temp-tempstatmed)), by=STATE]
+datstations[record == tempdif, .(USAFID, temp, tempstatmed, STATE)]
+
+dat_temp <- datstations[record == tempdif, .(USAFID, temp, tempstatmed, STATE)]
+dat_temp
+
+dat_temp <- merge(
+  x=dat_temp, 
+  y=all, 
+  by="USAFID",
+  all.x=TRUE,
+  all.y=FALSE
+)
+
+library(leaflet)
+statecenter <- location[, .(lon, lat)]
+statecenter[, type := "Center of the state"]
+tempcenter <- dat_temp[, .(lon, lat)]
+tempcenter[, type := "Center of the temperature"]
+datnew <- rbind(statecenter, tempcenter)
+
+plotdatnew <- colorFactor(c('blue', 'red'),
+                          domain = as.factor(datnew$type))
+
+leaflet(datnew) %>%
+  addProviderTiles("OpenStreetMap") %>%
+  addCircles(lng=~lon, lat=~lat, color=~plotdatnew(type), opacity=1, fillOpacity=1, radius=500)
+```
+
+## Question 4
+
+```{r}
+avgtempstate <- dat[, tempstate := mean(temp, na.rm=TRUE), by= STATE]
+dat[, templevel := fifelse(
+  tempstate<20, "lowtemp", 
+  fifelse(tempstate <25 & tempstate>=20, "mid-temp", "hightemp")
+)]
+
+table(avgtempstate$tempstate, useNA="always")
+dat[, .(
+  entries=.N, 
+  missing=sum(is.na(.SD)),
+  numberofstations = length(unique(USAFID)),
+  numberofstates=length(unique(STATE)),
+  meantemp=mean(temp, na.rm=TRUE),
+  meanwp=mean(wind.sp, na.rm=TRUE),
+  meanatmp=mean(atm.press, na.rm=TRUE)
+), by=templevel]
+```
